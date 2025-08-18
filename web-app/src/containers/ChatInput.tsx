@@ -59,10 +59,12 @@ const ChatInput = ({ model, className, initialMessage }: ChatInputProps) => {
   } = useAppState()
   const { prompt: globalPrompt, setPrompt: setGlobalPrompt } = usePrompt()
   const { currentThreadId, createThread } = useThreads()
-  
+
   // Use thread-aware prompt state
-  const prompt = currentThreadId ? getThreadPrompt(currentThreadId) : globalPrompt
-  const setPrompt = currentThreadId 
+  const prompt = currentThreadId
+    ? getThreadPrompt(currentThreadId)
+    : globalPrompt
+  const setPrompt = currentThreadId
     ? (value: string) => setThreadPrompt(currentThreadId, value)
     : setGlobalPrompt
   const { t } = useTranslation()
@@ -114,7 +116,7 @@ const ChatInput = ({ model, className, initialMessage }: ChatInputProps) => {
   // Check if there are active MCP servers
   const hasActiveMCPServers = connectedServers.length > 0 || tools.length > 0
 
-  const handleSendMesage = async (prompt: string) => {
+  const handleSendMessage = async (prompt: string) => {
     if (!selectedModel) {
       setMessage('Please select a model to start chatting.')
       return
@@ -123,7 +125,7 @@ const ChatInput = ({ model, className, initialMessage }: ChatInputProps) => {
       return
     }
     setMessage('')
-    
+
     // Create thread if none exists, otherwise use current thread
     if (!currentThreadId) {
       try {
@@ -134,13 +136,19 @@ const ChatInput = ({ model, className, initialMessage }: ChatInputProps) => {
         }
         const threadModel: ThreadModel = {
           id: selectedModel.id,
-          provider: selectedProvider
+          provider: selectedProvider,
         }
-        const newThread = await createThread(threadModel, prompt.trim().slice(0, 50))
-        
+        const newThread = await createThread(
+          threadModel,
+          prompt.trim().slice(0, 50)
+        )
+
         // Navigate to the new thread
-        router.navigate({ to: route.threadsDetail, params: { threadId: newThread.id } })
-        
+        router.navigate({
+          to: route.threadsDetail,
+          params: { threadId: newThread.id },
+        })
+
         // Queue the message after navigation
         addToThreadQueue(newThread.id, prompt.trim())
       } catch (error) {
@@ -424,7 +432,7 @@ const ChatInput = ({ model, className, initialMessage }: ChatInputProps) => {
                   e.nativeEvent.isComposing || e.keyCode === 229
                 if (e.key === 'Enter' && !isComposing && !e.shiftKey) {
                   e.preventDefault()
-                  handleSendMesage(prompt) // Use same handler as send button
+                  handleSendMessage(prompt) // Use same handler as send button
                 }
                 // Shift+Enter: Allow default behavior (new line)
               }}
@@ -628,7 +636,7 @@ const ChatInput = ({ model, className, initialMessage }: ChatInputProps) => {
                 size="icon"
                 disabled={!prompt.trim()}
                 data-test-id="send-message-button"
-                onClick={() => handleSendMesage(prompt)}
+                onClick={() => handleSendMessage(prompt)}
               >
                 {streamingContent ? (
                   <span className="animate-spin h-4 w-4 border-2 border-current border-t-transparent rounded-full" />
