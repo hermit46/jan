@@ -19,10 +19,15 @@ type AppState = {
   showOutOfContextDialog?: boolean
 
   // === NEW PER-THREAD STATE ===
-  streamingContentByThread: Record<string, ThreadMessage | undefined>
-  tokenSpeedByThread: Record<string, TokenSpeed | undefined>
+  promptsByThread: Record<string, string>
   queuedMessagesByThread: Record<string, string[]>
   errorsByThread: Record<string, string | ErrorObject | undefined>
+
+  // === CONCURRENT PROCESSING STATE ===
+  processingThreads: Record<string, boolean>
+  maxConcurrency: number
+  fallbackMode: 'single-thread' | 'estimated' | 'detected' | 'user-configured'
+  parallelProcessingEnabled: boolean
 
   // === LEGACY METHODS (unchanged for backward compatibility) ===
   updateStreamingContent: (content: ThreadMessage | undefined) => void
@@ -41,12 +46,9 @@ type AppState = {
   setOutOfContextDialog: (show: boolean) => void
 
   // === NEW THREAD-AWARE METHODS ===
-  updateThreadStreamingContent: (
-    threadId: string,
-    content?: ThreadMessage
-  ) => void
-  updateThreadTokenSpeed: (threadId: string, tokenSpeed?: TokenSpeed) => void
-  resetThreadTokenSpeed: (threadId: string) => void
+  setThreadPrompt: (threadId: string, prompt: string) => void
+  getThreadPrompt: (threadId: string) => string
+  clearThreadPrompt: (threadId: string) => void
   addToThreadQueue: (threadId: string, message: string) => void
   removeFromThreadQueue: (threadId: string) => string | undefined
   clearThreadQueue: (threadId: string) => void
@@ -58,6 +60,17 @@ type AppState = {
   clearThread: (threadId: string) => void
   clearAllThreads: () => void
   getAllActiveThreads: () => string[]
+
+  // === CONCURRENT PROCESSING METHODS ===
+  setThreadProcessing: (threadId: string, isProcessing: boolean) => void
+  setMaxConcurrency: (count: number) => void
+  setFallbackMode: (
+    mode: 'single-thread' | 'estimated' | 'detected' | 'user-configured'
+  ) => void
+  setParallelProcessingEnabled: (enabled: boolean) => void
+  getActiveProcessingCount: () => number
+  isThreadProcessing: (threadId: string) => boolean
+  getAvailableSlots: () => number
 }
 
 export const useAppState = create<AppState>()((set, get) => ({
@@ -75,10 +88,15 @@ export const useAppState = create<AppState>()((set, get) => ({
   showOutOfContextDialog: undefined,
 
   // === NEW PER-THREAD STATE ===
-  streamingContentByThread: {},
-  tokenSpeedByThread: {},
+  promptsByThread: {},
   queuedMessagesByThread: {},
   errorsByThread: {},
+
+  // === CONCURRENT PROCESSING STATE ===
+  processingThreads: {},
+  maxConcurrency: 1,
+  fallbackMode: 'single-thread',
+  parallelProcessingEnabled: false,
   updateStreamingContent: (content: ThreadMessage | undefined) => {
     const assistants = useAssistant.getState().assistants
     const currentAssistant = useAssistant.getState().currentAssistant
@@ -161,36 +179,25 @@ export const useAppState = create<AppState>()((set, get) => ({
   },
 
   // === NEW THREAD-AWARE METHODS ===
-  updateThreadStreamingContent: (threadId: string, content?: ThreadMessage) => {
-    set((state) => {
-      const assistants = useAssistant.getState().assistants
-      const currentAssistant = useAssistant.getState().currentAssistant
-      const selectedAssistant =
-        assistants.find((a) => a.id === currentAssistant.id) || assistants[0]
-
-      return {
-        streamingContentByThread: {
-          ...state.streamingContentByThread,
-          [threadId]: content
-            ? {
-                ...content,
-                created_at: content.created_at || Date.now(),
-                metadata: {
-                  ...content.metadata,
-                  assistant: selectedAssistant, // Add this line to use the variable
-                },
-              }
-            : undefined,
-        },
-      }
-    })
+  setThreadPrompt: (threadId: string, prompt: string) => {
+    set((state) => ({
+      promptsByThread: {
+        ...state.promptsByThread,
+        [threadId]: prompt,
+      },
+    }))
   },
 
-  updateThreadTokenSpeed: (threadId: string, tokenSpeed?: TokenSpeed) => {
+  getThreadPrompt: (threadId: string) => {
+    const state = get()
+    return state.promptsByThread[threadId] || ''
+  },
+
+  clearThreadPrompt: (threadId: string) => {
     set((state) => ({
-      tokenSpeedByThread: {
-        ...state.tokenSpeedByThread,
-        [threadId]: tokenSpeed,
+      promptsByThread: {
+        ...state.promptsByThread,
+        [threadId]: '',
       },
     }))
   },
@@ -236,15 +243,6 @@ export const useAppState = create<AppState>()((set, get) => ({
     return state.queuedMessagesByThread[threadId]?.length || 0
   },
 
-  resetThreadTokenSpeed: (threadId: string) => {
-    set((state) => ({
-      tokenSpeedByThread: {
-        ...state.tokenSpeedByThread,
-        [threadId]: undefined,
-      },
-    }))
-  },
-
   setThreadError: (threadId: string, error?: string | ErrorObject | null) => {
     set((state) => ({
       errorsByThread: {
@@ -256,35 +254,35 @@ export const useAppState = create<AppState>()((set, get) => ({
 
   clearThread: (threadId: string) => {
     set((state) => {
-      const newStreamingContent = { ...state.streamingContentByThread }
-      const newTokenSpeed = { ...state.tokenSpeedByThread }
+      const newPrompts = { ...state.promptsByThread }
       const newQueuedMessages = { ...state.queuedMessagesByThread }
       const newErrors = { ...state.errorsByThread }
       const newAbortControllers = { ...state.abortControllers }
+      const newProcessingThreads = { ...state.processingThreads }
 
-      delete newStreamingContent[threadId]
-      delete newTokenSpeed[threadId]
+      delete newPrompts[threadId]
       delete newQueuedMessages[threadId]
       delete newErrors[threadId]
       delete newAbortControllers[threadId]
+      delete newProcessingThreads[threadId]
 
       return {
-        streamingContentByThread: newStreamingContent,
-        tokenSpeedByThread: newTokenSpeed,
+        promptsByThread: newPrompts,
         queuedMessagesByThread: newQueuedMessages,
         errorsByThread: newErrors,
         abortControllers: newAbortControllers,
+        processingThreads: newProcessingThreads,
       }
     })
   },
 
   clearAllThreads: () => {
     set({
-      streamingContentByThread: {},
-      tokenSpeedByThread: {},
+      promptsByThread: {},
       queuedMessagesByThread: {},
       errorsByThread: {},
       abortControllers: {},
+      processingThreads: {},
     })
   },
 
@@ -293,11 +291,8 @@ export const useAppState = create<AppState>()((set, get) => ({
     const activeThreads = new Set<string>()
 
     // Collect thread IDs that have any active state
-    Object.keys(state.streamingContentByThread).forEach((id) => {
-      if (state.streamingContentByThread[id]) activeThreads.add(id)
-    })
-    Object.keys(state.tokenSpeedByThread).forEach((id) => {
-      if (state.tokenSpeedByThread[id]) activeThreads.add(id)
+    Object.keys(state.promptsByThread).forEach((id) => {
+      if (state.promptsByThread[id]) activeThreads.add(id)
     })
     Object.keys(state.queuedMessagesByThread).forEach((id) => {
       if (state.queuedMessagesByThread[id]) activeThreads.add(id)
@@ -307,5 +302,44 @@ export const useAppState = create<AppState>()((set, get) => ({
     })
 
     return Array.from(activeThreads)
+  },
+
+  // === CONCURRENT PROCESSING METHODS ===
+  setThreadProcessing: (threadId: string, isProcessing: boolean) => {
+    set((state) => ({
+      processingThreads: {
+        ...state.processingThreads,
+        [threadId]: isProcessing,
+      },
+    }))
+  },
+
+  setMaxConcurrency: (count: number) => {
+    set({ maxConcurrency: Math.max(1, count) }) // Ensure minimum of 1
+  },
+
+  setFallbackMode: (
+    mode: 'single-thread' | 'estimated' | 'detected' | 'user-configured'
+  ) => {
+    set({ fallbackMode: mode })
+  },
+
+  setParallelProcessingEnabled: (enabled: boolean) => {
+    set({ parallelProcessingEnabled: enabled })
+  },
+
+  getActiveProcessingCount: () => {
+    const state = get()
+    return Object.values(state.processingThreads).filter(Boolean).length
+  },
+
+  isThreadProcessing: (threadId: string) => {
+    const state = get()
+    return Boolean(state.processingThreads[threadId])
+  },
+
+  getAvailableSlots: () => {
+    const state = get()
+    return state.maxConcurrency - state.getActiveProcessingCount()
   },
 }))
