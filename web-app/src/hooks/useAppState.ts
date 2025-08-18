@@ -43,6 +43,8 @@ type AppState = {
   updateLoadingModel: (loading: boolean) => void
   updateTools: (tools: MCPTool[]) => void
   setAbortController: (threadId: string, controller: AbortController) => void
+  updateTokenSpeed: (message: ThreadMessage, increment?: number) => void
+  resetTokenSpeed: () => void
   setOutOfContextDialog: (show: boolean) => void
 
   // === NEW THREAD-AWARE METHODS ===
@@ -136,7 +138,7 @@ export const useAppState = create<AppState>()((set, get) => ({
       },
     }))
   },
-  updateTokenSpeed: (message) =>
+  updateTokenSpeed: (message, increment = 1) =>
     set((state) => {
       const currentTimestamp = new Date().getTime()
       if (!state.tokenSpeed) {
@@ -144,15 +146,15 @@ export const useAppState = create<AppState>()((set, get) => ({
           tokenSpeed: {
             lastTimestamp: currentTimestamp,
             tokenSpeed: 0,
-            tokenCount: 1,
+            tokenCount: increment,
             message: message.id,
           },
         }
       }
 
       const timeDiffInSeconds =
-        (currentTimestamp - state.tokenSpeed.lastTimestamp) / 1000
-      const totalTokenCount = state.tokenSpeed.tokenCount + 1
+        (currentTimestamp - state.tokenSpeed.lastTimestamp) / 1000 // Time difference in seconds
+      const totalTokenCount = state.tokenSpeed.tokenCount + increment
       const averageTokenSpeed =
         totalTokenCount / (timeDiffInSeconds > 0 ? timeDiffInSeconds : 1)
 

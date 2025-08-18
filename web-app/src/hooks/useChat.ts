@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo } from 'react'
+import { useCallback, useMemo } from 'react'
 import { usePrompt } from './usePrompt'
 import { useModelProvider } from './useModelProvider'
 import { useThreads } from './useThreads'
@@ -19,10 +19,7 @@ import {
 import { CompletionMessagesBuilder } from '@/lib/messages'
 import { ChatCompletionMessageToolCall } from 'openai/resources'
 import { useAssistant } from './useAssistant'
-import { getTools } from '@/services/mcp'
-import { MCPTool } from '@/types/completion'
-import { listen } from '@tauri-apps/api/event'
-import { SystemEvent } from '@/types/events'
+
 import { stopModel, startModel, stopAllModels } from '@/services/models'
 
 import { useToolApproval } from '@/hooks/useToolApproval'
@@ -32,6 +29,10 @@ import { updateSettings } from '@/services/providers'
 import { useContextSizeApproval } from './useModelContextApproval'
 import { useModelLoad } from './useModelLoad'
 import { useGeneralSetting } from './useGeneralSetting'
+import {
+  ReasoningProcessor,
+  extractReasoningFromMessage,
+} from '@/utils/reasoning'
 
 export const useChat = () => {
   const { prompt, setPrompt } = usePrompt()
@@ -40,7 +41,6 @@ export const useChat = () => {
     tools,
     updateTokenSpeed,
     resetTokenSpeed,
-    updateTools,
     updateStreamingContent,
     updateLoadingModel,
     setAbortController,
@@ -78,22 +78,6 @@ export const useChat = () => {
 
   const selectedAssistant =
     assistants.find((a) => a.id === currentAssistant.id) || assistants[0]
-
-  useEffect(() => {
-    function setTools() {
-      getTools().then((data: MCPTool[]) => {
-        updateTools(data)
-      })
-    }
-    setTools()
-
-    let unsubscribe = () => {}
-    listen(SystemEvent.MCP_UPDATE, setTools).then((unsub) => {
-      // Unsubscribe from the event when the component unmounts
-      unsubscribe = unsub
-    })
-    return unsubscribe
-  }, [updateTools])
 
   const getCurrentThread = useCallback(async () => {
     let currentThread = retrieveThread()
@@ -317,42 +301,38 @@ export const useChat = () => {
           const toolCalls: ChatCompletionMessageToolCall[] = []
           try {
             if (isCompletionResponse(completion)) {
-              accumulatedText =
-                (completion.choices[0]?.message?.content as string) || ''
-              if (completion.choices[0]?.message?.tool_calls) {
-                toolCalls.push(...completion.choices[0].message.tool_calls)
+              const message = completion.choices[0]?.message
+              accumulatedText = (message?.content as string) || ''
+
+              // Handle reasoning field if there is one
+              const reasoning = extractReasoningFromMessage(message)
+              if (reasoning) {
+                accumulatedText =
+                  `<think>${reasoning}</think>` + accumulatedText
+              }
+
+              if (message?.tool_calls) {
+                toolCalls.push(...message.tool_calls)
               }
             } else {
-              for await (const part of completion) {
-                // Error message
-                if (!part.choices) {
-                  throw new Error(
-                    'message' in part
-                      ? (part.message as string)
-                      : (JSON.stringify(part) ?? '')
-                  )
+              // High-throughput scheduler: batch UI updates on rAF (requestAnimationFrame)
+              let rafScheduled = false
+              let rafHandle: number | undefined
+              let pendingDeltaCount = 0
+              const reasoningProcessor = new ReasoningProcessor()
+              const scheduleFlush = () => {
+                if (rafScheduled) return
+                rafScheduled = true
+                const doSchedule = (cb: () => void) => {
+                  if (typeof requestAnimationFrame !== 'undefined') {
+                    rafHandle = requestAnimationFrame(() => cb())
+                  } else {
+                    // Fallback for non-browser test environments
+                    const t = setTimeout(() => cb(), 0) as unknown as number
+                    rafHandle = t
+                  }
                 }
-                const delta = part.choices[0]?.delta?.content || ''
-
-                if (part.choices[0]?.delta?.tool_calls) {
-                  const calls = extractToolCall(part, currentCall, toolCalls)
-                  const currentContent = newAssistantThreadContent(
-                    activeThread.id,
-                    accumulatedText,
-                    {
-                      tool_calls: calls.map((e) => ({
-                        ...e,
-                        state: 'pending',
-                      })),
-                    }
-                  )
-                  updateStreamingContent(currentContent)
-                  await new Promise((resolve) => setTimeout(resolve, 0))
-                }
-                if (delta) {
-                  accumulatedText += delta
-                  // Create a new object each time to avoid reference issues
-                  // Use a timeout to prevent React from batching updates too quickly
+                doSchedule(() => {
                   const currentContent = newAssistantThreadContent(
                     activeThread.id,
                     accumulatedText,
@@ -364,10 +344,76 @@ export const useChat = () => {
                     }
                   )
                   updateStreamingContent(currentContent)
-                  updateTokenSpeed(currentContent)
-                  await new Promise((resolve) => setTimeout(resolve, 0))
+                  if (pendingDeltaCount > 0) {
+                    updateTokenSpeed(currentContent, pendingDeltaCount)
+                  }
+                  pendingDeltaCount = 0
+                  rafScheduled = false
+                })
+              }
+              const flushIfPending = () => {
+                if (!rafScheduled) return
+                if (
+                  typeof cancelAnimationFrame !== 'undefined' &&
+                  rafHandle !== undefined
+                ) {
+                  cancelAnimationFrame(rafHandle)
+                } else if (rafHandle !== undefined) {
+                  clearTimeout(rafHandle)
+                }
+                // Do an immediate flush
+                const currentContent = newAssistantThreadContent(
+                  activeThread.id,
+                  accumulatedText,
+                  {
+                    tool_calls: toolCalls.map((e) => ({
+                      ...e,
+                      state: 'pending',
+                    })),
+                  }
+                )
+                updateStreamingContent(currentContent)
+                if (pendingDeltaCount > 0) {
+                  updateTokenSpeed(currentContent, pendingDeltaCount)
+                }
+                pendingDeltaCount = 0
+                rafScheduled = false
+              }
+              for await (const part of completion) {
+                // Error message
+                if (!part.choices) {
+                  throw new Error(
+                    'message' in part
+                      ? (part.message as string)
+                      : (JSON.stringify(part) ?? '')
+                  )
+                }
+
+                if (part.choices[0]?.delta?.tool_calls) {
+                  extractToolCall(part, currentCall, toolCalls)
+                  // Schedule a flush to reflect tool update
+                  scheduleFlush()
+                }
+                const deltaReasoning =
+                  reasoningProcessor.processReasoningChunk(part)
+                if (deltaReasoning) {
+                  accumulatedText += deltaReasoning
+                  pendingDeltaCount += 1
+                  // Schedule flush for reasoning updates
+                  scheduleFlush()
+                }
+                const deltaContent = part.choices[0]?.delta?.content || ''
+                if (deltaContent) {
+                  accumulatedText += deltaContent
+                  pendingDeltaCount += 1
+                  // Batch UI update on next animation frame
+                  scheduleFlush()
                 }
               }
+              // Finalize reasoning (close any open think tags)
+              accumulatedText += reasoningProcessor.finalize()
+              // Ensure any pending buffered content is rendered at the end
+              flushIfPending()
             }
           } catch (error) {
             const errorMessage =
